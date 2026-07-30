@@ -67,7 +67,7 @@ We will be editing the definition of `MadxTfs2GmadBeam`. I use nano here because
     else:
         raise ValueError("Unsupported particle " + particle)
 ```
-NOTE THAT THIS FILE IS SPACE IDENTED, so your additions will also need to use spaces rather than tabs, even in VS Code, in my case. We add our muon definitions in a purposely parallel manner like so:
+NOTE THAT THIS FILE IS SPACE INDENTED, so your additions will also need to use spaces rather than tabs, even in VS Code, in my case. We add our muon definitions in a purposely parallel manner like so:
 ```
     if particle == 'ELECTRON':
         particle = 'e-'
