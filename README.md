@@ -93,7 +93,7 @@ chmod +x madx-linux64-gnu
 And then, if you'd like to be able to call MAD-X from anywhere, I recommend putting an alias in your `.bashrc`. I added `export MADX=/PATH/TO/YOUR/madx_install/madx-linux64-gnu` to my `.bashrc` and sourced it, `source ~/.bashrc` to set it.
 
 ### Acquiring Accelerator Geometry
-Note that this code is NOT future-proofed and does rely on some hardcoded values for the 3 TeV and 10 TeV CoM Muon Collider rings as provided by the IMCC. To be able to generate flux using these rings, you will need the accelerator geometries. You are HIGHLY RECOMMENDED to navigate to the top directory of this repository you've cloned (or wherever you are placing `generate_nu_flux.py`) and clone the the IMCC accelerator repo to the same directory. Otherwise, the python script will likely break because it cannot find the geometries.
+Note that this code is NOT future-proofed and does rely on some hardcoded values for the 3 TeV and 10 TeV CoM Muon Collider rings as provided by the IMCC. **It is known that the version this script is written for it v0.6. Work is being done to source v0.8, and the script will be adapted for those files ASAP.** To be able to generate flux using these rings, you will need the accelerator geometries. You are HIGHLY RECOMMENDED to navigate to the top directory of this repository you've cloned (or wherever you are placing `generate_nu_flux.py`) and clone the the IMCC accelerator repo to the same directory. Otherwise, the python script will likely break because it cannot find the geometries.
 
 Once in the same directory as `generate_nu_flux.py`, clone the repository `git clone https://gitlab.cern.ch/acc-models/acc-models-mc.git`.
 
