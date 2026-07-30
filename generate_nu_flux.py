@@ -435,6 +435,7 @@ def main():
     xp = ak.flatten(sampler.xp) # Direction cosine X
     yp = ak.flatten(sampler.yp) # Direction cosine Y
     zp = ak.flatten(sampler.zp) # Direction cosine Z
+    t = ak.flatten(sampler.T)   # Global time in seconds (s)
     weight = ak.flatten(sampler.weight)
 
     # Filter for neutrinos. Can add nu_taus later if you want with 16
@@ -446,6 +447,8 @@ def main():
     nu_PDG = partID[nu_mask]
     nu_Energy = part_energy[nu_mask]
     nu_weight = weight[nu_mask]
+    nu_time_s = t[nu_mask] # save time in nanoseconds. This is time since the
+    # beam was fired.
 
     # Save positions for GENIE in meters ...
     nu_x_m = x[nu_mask]
@@ -480,7 +483,9 @@ def main():
             "pz": np.asarray(nu_pz_norm, dtype=np.float64),             # C++ Double_t
             "x_mm": np.asarray(nu_x_mm, dtype=np.float64),         # C++ Double_t
             "y_mm": np.asarray(nu_y_mm, dtype=np.float64),         # C++ Double_t
-            "weight": np.asarray(nu_weight, dtype=np.float64)      # C++ Double_t
+            "weight": np.asarray(nu_weight, dtype=np.float64),      # C++ Double_t
+            "t_ns": np.asarray(nu_time_s, dtype=np.float64)       # C++ Double_t
+
         }
 
     print(f"Success! Exported {len(nu_PDG)} neutrinos to {g4_output_filename} in the NeutrinoFlux tree.")
@@ -511,6 +516,7 @@ def main():
         entry.vtxx = float(nu_x_m[i])
         entry.vtxy = float(nu_y_m[i])
         entry.vtxz = float(nu_z_m[i])
+        entry.vtxt = float(nu_time_s[i]) *1e-9 # GENIE wants it in seconds
         entry.dist = 0.0   
         entry.px = float(nu_px[i])
         entry.py = float(nu_py[i])
