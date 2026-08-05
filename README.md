@@ -1,4 +1,4 @@
-# GEANT4_MuC_Nu_Flux_Gen
+# NuFlux
 Script that generates flux files using MAD-X, GEANT4, and BDSIM, specifically for neutrino interaction studies for future Muon Colliders.
 
 These scripts use the official muon collider 3 TeV and 10 TeV ring magnet layout MAD-X files and information to propagate a muon beam using BDSIM to generate muons with a biased lifetime to facilitate decays to neutrinos, which are read out 6 meters from the interaction point. This generates two neutrino flux files, one optimized for GEANT4 investigations and one specifically created to be GENIE-readable. This is all done within an interactive Python wrapper that aims to make the process of generating and saving these files as intuitive and accessible as possible.
