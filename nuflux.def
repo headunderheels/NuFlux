@@ -1,0 +1,308 @@
+# nuflux.def
+#
+# Native Apptainer build for NuFlux (https://github.com/headunderheels/NuFlux)
+# — no Docker required anywhere in this pipeline.
+#
+# Build (needs root or --fakeroot; see README-apptainer.md for the
+# no-privilege-at-all Remote Builder option):
+#   apptainer build --fakeroot nuflux.sif nuflux.def
+#
+# Run (interactive — the script uses input() prompts):
+#   apptainer run --bind ./output:/work/output nuflux.sif
+#
+# NOTE ON STAGE STRUCTURE: unlike Docker's `FROM builder AS x`, Apptainer
+# stages do NOT inherit each other's installed packages/state — each stage
+# bootstraps fresh from its own Bootstrap/From line. Cross-stage reuse only
+# happens via `%files from <stage>`, copying specific paths. So each build
+# stage below repeats its own apt-get install rather than inheriting one
+# "builder-base" stage, same net effect as the Dockerfile, different
+# mechanism.
+#
+# VERSION PINS: same caveat as the Dockerfile — GEANT4/ROOT/BDSIM
+# compatibility isn't pinned upstream. Adjust the version strings below
+# (search for CLHEP_VERSION / GEANT4_VERSION / ROOT_VERSION / BDSIM_BRANCH
+# mentions) if a stage fails to configure/build.
+
+# =============================================================================
+# Stage: root-install — prebuilt ROOT binary release
+# =============================================================================
+Bootstrap: docker
+From: ubuntu:22.04
+Stage: root-install
+
+%post
+    apt-get update && apt-get install -y --no-install-recommends wget ca-certificates
+    cd /opt
+    # ROOT prebuilt binary. This URL/filename is version- AND Ubuntu-point-
+    # release- AND gcc-version-specific, and root.cern's naming changes between
+    # releases — it is the single most likely line to need updating. Find the
+    # current "Linux Ubuntu 22 (x86_64)" tarball URL at:
+    #   https://root.cern/install/all_releases/
+    # Override without editing this file by exporting APPTAINERENV_ROOT_URL
+    # before building (Apptainer copies APPTAINERENV_* vars into %post):
+    #   export APPTAINERENV_ROOT_URL="https://root.cern/download/root_v<...>.tar.gz"
+    #   apptainer build --fakeroot nuflux.sif nuflux.def
+    # Or just replace the default URL on the line below.
+    # ROOT 6.34.10 — this is STAGE 1 of the two-stage workflow (see
+    # genie_convert/README.md). Stage 1's ROOT is INDEPENDENT of the GENIE
+    # container's ROOT: the two stages exchange only a plain .root file
+    # (compatible across ROOT 6.x), so stage 1 does NOT need to match GENIE's
+    # 6.28. It DOES need PyROOT (the script's `import ROOT`), which standard
+    # root.cern binaries include. 6.34.10 was verified reachable (HTTP 200);
+    # adjust for your target if root.cern's filename differs — see
+    # https://root.cern/install/all_releases/ (Ubuntu 22 x86_64).
+    ROOT_URL="${ROOT_URL:-https://root.cern/download/root_v6.34.10.Linux-ubuntu22.04-x86_64-gcc11.4.tar.gz}"
+    echo "Fetching ROOT from: $ROOT_URL"
+    # Fail fast with a clear message if the URL 404s, rather than letting
+    # `wget -q` silently save an HTML error page and break `tar` cryptically.
+    if ! wget -q --spider "$ROOT_URL"; then
+        echo "ERROR: ROOT URL not reachable / not found (404?):" >&2
+        echo "  $ROOT_URL" >&2
+        echo "Fix it at https://root.cern/install/all_releases/ (Ubuntu 22 x86_64)" >&2
+        echo "then re-run the build." >&2
+        exit 1
+    fi
+    wget -q "$ROOT_URL" -O root.tar.gz
+    tar -xzf root.tar.gz
+    rm root.tar.gz
+    # Result: /opt/root/
+
+# =============================================================================
+# Stage: clhep-build
+# =============================================================================
+Bootstrap: docker
+From: ubuntu:22.04
+Stage: clhep-build
+
+%post
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates
+    mkdir -p /opt/build && cd /opt/build
+    git clone --branch CLHEP_2_4_7_1 --depth 1 https://gitlab.cern.ch/CLHEP/CLHEP.git clhep-src
+    mkdir clhep-build && cd clhep-build
+    cmake ../clhep-src -DCMAKE_INSTALL_PREFIX=/opt/clhep
+    make -j"$(nproc)"
+    make install
+    # Result: /opt/clhep/
+
+# =============================================================================
+# Stage: geant4-build — configured against the CLHEP build above
+# =============================================================================
+Bootstrap: docker
+From: ubuntu:22.04
+Stage: geant4-build
+
+%files from clhep-build
+    /opt/clhep /opt/clhep
+
+%post
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates \
+        libexpat1-dev libxml2-dev libxerces-c-dev zlib1g-dev
+        # Viz packages (qtbase5-dev, libqt5opengl5-dev, libmotif-dev, and the
+        # libx*/libgl* GUI libs) were removed with the headless viz-off config
+        # below. Re-add them here if you re-enable GEANT4_USE_QT/OPENGL_X11.
+    mkdir -p /opt/build && cd /opt/build
+    git clone --branch v11.2.1 --depth 1 https://github.com/Geant4/geant4.git geant4-src
+    mkdir geant4-build && cd geant4-build
+    cmake ../geant4-src \
+        -DCMAKE_INSTALL_PREFIX=/opt/geant4 \
+        -DGEANT4_INSTALL_DATA=ON \
+        -DGEANT4_USE_SYSTEM_CLHEP=ON \
+        -DCLHEP_ROOT_DIR=/opt/clhep \
+        -DGEANT4_USE_GDML=ON \
+        -DGEANT4_BUILD_MULTITHREADED=ON
+        # GEANT4_USE_GDML=ON (needs libxerces-c-dev, installed above): BDSIM
+        # auto-enables its own GDML support when it finds Xerces-C, then REQUIRES
+        # the GEANT4 it links against to also have GDML — without this flag the
+        # BDSIM cmake fails with "Geant4 was not compiled with GDML support".
+        # Interactive visualization (Qt/OpenGL/X11) is OFF: this container runs
+        # headless in --batch mode to generate flux files, so GEANT4's Qt/GL viz
+        # is dead weight and pulls in extra deps (it was the Qt5OpenGL cmake
+        # failure). To RE-ENABLE viz, add back:
+        #     -DGEANT4_USE_OPENGL_X11=ON -DGEANT4_USE_QT=ON
+        # AND install the viz dev packages in the apt line above:
+        #     qtbase5-dev libqt5opengl5-dev libmotif-dev
+        # (qtbase5-dev alone is NOT enough — Qt5OpenGL is a separate package.)
+    make -j"$(nproc)"
+    make install
+    # Result: /opt/geant4/ — this is the slow stage (compile + physics data)
+
+# =============================================================================
+# Stage: bdsim-build — linked against GEANT4 + CLHEP + ROOT from prior stages
+# =============================================================================
+Bootstrap: docker
+From: ubuntu:22.04
+Stage: bdsim-build
+
+%files from clhep-build
+    /opt/clhep /opt/clhep
+%files from geant4-build
+    /opt/geant4 /opt/geant4
+%files from root-install
+    /opt/root /opt/root
+
+%post
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates \
+        flex bison libtbb-dev \
+        libexpat1-dev libxml2-dev libxerces-c-dev zlib1g-dev
+        # flex + bison: BDSIM builds its GMAD lattice parser with them
+        # (parser/CMakeLists.txt does find_package(BISON)/FLEX). Without them
+        # BDSIM cmake fails with "Could NOT find BISON".
+        # libtbb-dev: ROOT 6.34's libImt (implicit multithreading) links
+        # against Intel TBB (libtbb.so.12). Without it, BDSIM executables that
+        # link ROOT fail with "undefined reference to tbb::detail::..." /
+        # "libtbb.so.12 not found". Runtime stage needs libtbb12 to match.
+        # Headless: no Qt/Motif/X11 GUI dev libs. BDSIM auto-detects viz from
+        # the GEANT4 it links against, and that GEANT4 was built viz-off, so
+        # BDSIM builds headless too. If you re-enable GEANT4 viz, add the same
+        # viz packages back here as well.
+    export CLHEP_ROOT_DIR=/opt/clhep
+    export G4INSTALL=/opt/geant4
+    cd /opt
+    # VERSION COMBINATION baked into this build:
+    #   CLHEP 2.4.7.1 · GEANT4 v11.2.1 · ROOT 6.34.10 · BDSIM develop
+    # BDSIM is the component that constrains this matrix. If the cmake below
+    # fails, check BDSIM's docs for which GEANT4/ROOT it supports on your BDSIM
+    # branch, and adjust the pins (CLHEP branch line ~73, GEANT4 ~97, ROOT_URL
+    # ~46, BDSIM branch below). Pinning BDSIM to a released tag instead of
+    # `develop` is often more stable than tracking the moving develop branch.
+    git clone --recursive --branch develop --depth 1 \
+        https://github.com/bdsim-collaboration/bdsim.git bdsim-src
+    mkdir bdsim-build && cd bdsim-build
+    # NOTE: geant4.sh / thisroot.sh use bash-only syntax (e.g. BASH_SOURCE),
+    # but Apptainer runs %post under /bin/sh (dash), which errors with
+    # "Bad substitution". Run the env-sourcing + configure/build under bash.
+    bash -c '
+        set -e
+        . /opt/geant4/bin/geant4.sh
+        . /opt/root/bin/thisroot.sh
+        cmake ../bdsim-src -DCMAKE_INSTALL_PREFIX=/opt/bdsim
+        make -j"$(nproc)"
+        make install
+    '
+    # Result: /opt/bdsim/
+
+# =============================================================================
+# Final stage — runtime image
+# =============================================================================
+Bootstrap: docker
+From: ubuntu:22.04
+Stage: final
+
+%files from clhep-build
+    /opt/clhep /opt/clhep
+%files from root-install
+    /opt/root /opt/root
+%files from geant4-build
+    /opt/geant4 /opt/geant4
+%files from bdsim-build
+    /opt/bdsim /opt/bdsim
+
+%files
+    patches/patch_pybdsim.py /opt/patch_pybdsim.py
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip \
+        g++ libstdc++-11-dev \
+        libexpat1 libxml2 libxerces-c3.2 libtbb12 \
+        zlib1g wget git ca-certificates
+        # g++ + libstdc++-11-dev: REQUIRED at runtime, not just build time.
+        # ROOT's Cling is a JIT C++ interpreter; PyROOT (`import ROOT`) makes
+        # Cling compile C++ on the fly, so it needs the C++ standard-library
+        # headers (<new>, <vector>, ...) present in the final image. Without
+        # them `import ROOT` aborts with "cannot extract standard library
+        # include paths / 'new' file not found". This is the runtime stage, so
+        # they must be installed HERE (the build stages having them isn't
+        # enough — this is a fresh ubuntu:22.04 layer).
+        # libtbb12: runtime counterpart of libtbb-dev in the build stage —
+        # ROOT's libImt needs libtbb.so.12 present at run time too.
+        # Headless runtime: dropped libmotif4, libqt5widgets5, and the libx*/
+        # libgl* runtime libs that only existed for GEANT4's Qt/OpenGL viz
+        # (built viz-off). Re-add them here if you re-enable viz in the build.
+    rm -rf /var/lib/apt/lists/*
+
+    # MAD-X: prebuilt static binary, per the upstream README
+    mkdir -p /opt/madx
+    wget -q https://madx.web.cern.ch/madx/releases/last-rel/madx-linux64-gnu \
+        -O /opt/madx/madx-linux64-gnu
+    chmod +x /opt/madx/madx-linux64-gnu
+
+    # Python deps + the muon/antimuon patch for pybdsim
+    # generate_nu_flux.py imports pybdsim, uproot, numpy, awkward (ROOT from
+    # the /opt/root install). Upstream README lists only pybdsim/pymadx.
+    pip install --no-cache-dir pybdsim pymadx uproot numpy awkward
+    python3 /opt/patch_pybdsim.py
+
+    # Mount point for a bind-mounted GENIE install (see %environment). Must
+    # exist in the read-only image for `apptainer run --bind ...:/opt/genie`
+    # to attach onto it. Empty unless you mount GENIE there at run time.
+    mkdir -p /opt/genie
+
+    # NuFlux itself + the accelerator geometry repo it needs alongside it
+    mkdir -p /work
+    cd /work
+    git clone https://github.com/headunderheels/NuFlux.git .
+    git clone https://gitlab.cern.ch/acc-models/acc-models-mc.git
+
+%environment
+    # NOTE: %environment is sourced by /bin/sh at RUN time, so it must NOT
+    # `source` geant4.sh/thisroot.sh (bash-only syntax -> "Bad substitution").
+    # We set the variables those scripts would set, directly, instead. The
+    # %runscript re-sources them under bash for anything not covered here.
+    export MADX=/opt/madx/madx-linux64-gnu
+    export ROOTSYS=/opt/root
+    export G4INSTALL=/opt/geant4
+    # GENIE is NOT built into this image (it's undocumented upstream and heavy).
+    # generate_nu_flux.py calls ROOT.gSystem.Load("libGTlFlx") to write its
+    # second, GENIE-format ("gsimple") output file, and sys.exit(1)s if that
+    # load fails. Bind-mount your GENIE install over /opt/genie at run time;
+    # GENIE_LIB is prepended to LD_LIBRARY_PATH below so libGTlFlx is found.
+    # Override GENIE_LIB at run time (APPTAINERENV_GENIE_LIB=...) if your GENIE
+    # libs live somewhere other than /opt/genie/lib. GENIE typically also needs
+    # its LHAPDF/PYTHIA6/log4cpp libs on the path — mount/point at those too.
+    export GENIE_LIB=/opt/genie/lib
+    export LD_LIBRARY_PATH=${GENIE_LIB}:/opt/clhep/lib:/opt/root/lib:/opt/geant4/lib:/opt/bdsim/lib:${LD_LIBRARY_PATH}
+    export PATH=/opt/root/bin:/opt/geant4/bin:/opt/bdsim/bin:/opt/madx:${PATH}
+
+%runscript
+    #!/bin/bash
+    # Source GEANT4/ROOT under bash (their init scripts use bash-only syntax).
+    # This sets the GEANT4 data-file env vars (G4LEDATA etc.) the simulation
+    # needs — PATH/LD_LIBRARY_PATH are already set in %environment.
+    source /opt/geant4/bin/geant4.sh
+    source /opt/root/bin/thisroot.sh
+    [ -f /opt/bdsim/bin/bdsim.sh ] && source /opt/bdsim/bin/bdsim.sh
+
+    if [ -z "$MADX" ]; then
+        echo "WARNING: \$MADX not set — generate_nu_flux.py will fall back to a" >&2
+        echo "hardcoded path and likely fail to find MAD-X." >&2
+    fi
+
+    # GENIE pre-flight: the script hard-exits (sys.exit 1) if it can't load
+    # libGTlFlx for its second (gsimple) output file. Warn clearly here if no
+    # GENIE was bind-mounted, so the failure is understandable rather than a
+    # bare "Could not load GENIE's libGTlFlx" mid-run.
+    if ! ls "${GENIE_LIB:-/opt/genie/lib}"/libGTlFlx* >/dev/null 2>&1; then
+        echo "WARNING: libGTlFlx not found under \$GENIE_LIB=${GENIE_LIB:-/opt/genie/lib}." >&2
+        echo "GENIE is not built into this image. The MAD-X/BDSIM/GEANT4 run and the" >&2
+        echo "first (GEANT4) output file will work, but the GENIE 'gsimple' output" >&2
+        echo "step will fail. To enable it, bind-mount your GENIE install, e.g.:" >&2
+        echo "  apptainer run --bind ./work:/work --bind /path/to/genie:/opt/genie nuflux.sif" >&2
+        echo "and ensure libGTlFlx (and GENIE's LHAPDF/PYTHIA6/log4cpp libs) are under it." >&2
+    fi
+
+    # generate_nu_flux.py resolves geometry via CWD-relative paths, e.g.
+    #   collider_dir = "acc-models-mc/collider/10_TeV/"
+    # so run from /work with acc-models-mc beside the script. In this
+    # from-source image /work is baked in at build time, but if you bind-mount
+    # over it, keep the script + acc-models-mc together.
+    cd /work
+    exec python3 generate_nu_flux.py "$@"
+
+%labels
+    Author you
+    Description Containerized NuFlux (GEANT4/BDSIM/MAD-X neutrino flux generator)

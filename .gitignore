@@ -1,1 +1,10 @@
-acc_models/
+
+# Build artifacts — never commit (2.2GB image)
+*.sif
+
+# Runtime working set (cloned NuFlux + acc-models-mc + outputs)
+work/
+
+# Common build/output detritus
+*.root
+output/
