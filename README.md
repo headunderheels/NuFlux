@@ -24,9 +24,6 @@ checks/
                       stack links and imports.
 ```
 
-Not tracked in git (see `.gitignore`): `nuflux.sif` (the ~2.2 GB built image),
-`work/` (the runtime working set), and `*.root` outputs.
-
 ## Quick start (use the prebuilt image)
 
 ### 1. Pull the images
