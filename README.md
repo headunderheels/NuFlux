@@ -16,17 +16,13 @@ Everything here is runnable with Apptainer (e.g. on the OSG cluster).
 nuflux.def            Apptainer definition (CLHEP, GEANT4 11.2.1, ROOT 6.34 w/ PyROOT, BDSIM, MAD-X).
 patches/
   patch_pybdsim.py    Teaches pybdsim the MUON/ANTIMUON particles.
-genie_convert/        Wrapper + RNTuple->TTree bridge (workaround for issues with ROOT versioning) + GENIE gsimple converter. See genie_convert/README.md.
+genie_convert/        Wrapper + RNTuple->TTree bridge (workaround for issues with ROOT versioning) + GENIE gsimple converter.
 checks/
   prebuild-checks.sh  Host preflight — run BEFORE building (apptainer, fakeroot,
                       files, network, disk). Nothing compiles.
   validate_stack.sh   Post-build check — run INSIDE the .sif to confirm the
                       stack links and imports.
-README-apptainer.md   Full build details, privileges, and caveats.
 ```
-
-Not tracked in git (see `.gitignore`): `nuflux.sif` (the ~2.2 GB built image),
-`work/` (the runtime working set), and `*.root` outputs.
 
 ## Quick start
 
