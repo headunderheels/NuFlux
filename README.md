@@ -28,7 +28,7 @@ README-apptainer.md   Full build details, privileges, and caveats.
 Not tracked in git (see `.gitignore`): `nuflux.sif` (the ~2.2 GB built image),
 `work/` (the runtime working set), and `*.root` outputs.
 
-## Quick start (use the prebuilt image)
+## Quick start
 
 ### 1. Pull the images
 
@@ -41,16 +41,16 @@ apptainer pull ~/images/genie.sif \
   docker://ghcr.io/lawrenceleejr/g4targetpractice-genie:claude-gdml-target-practice-refactor-mrygc9-f1e0631
 ```
 
-### 3. Set up the working set
 
-Clone the NuFlux script and the accelerator geometry into a `work/` directory —
-this is what the pipeline reads its inputs from and writes its outputs to:
+### 2. Set up the working set
+
+Clone the accelerator geometry into `work/` — this is where the pipeline reads inputs and writes outputs. The core script (`generate_nu_flux.py`) ships in this repo and is copied in automatically when you run.
 
 ```bash
-git clone https://github.com/headunderheels/NuFlux.git work
-cd work && git clone https://gitlab.cern.ch/acc-models/acc-models-mc.git && \
-  mkdir -p output && cd ..
+mkdir -p work && git clone https://gitlab.cern.ch/acc-models/acc-models-mc.git work/acc-models-mc
 ```
+
+Point `NUFLUX_WORK` at this directory in the next step.
 
 ### 3. Run the two-stage pipeline
 
