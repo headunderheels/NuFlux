@@ -1,6 +1,6 @@
 # NuFlux — containerized muon-collider neutrino flux generator
 
-Containerized repackaging of [GEANT_MiC_Nu_Flux_Gen](https://github.com/jon-rositas/GEANT4_MuC_Nu_Flux_Gen), which propagates a muon beam through the IMCC 3 TeV / 10 TeV collider lattices with BDSIM/GEANT4 and produces neutrino flux files for downstream studies.
+Containerized repackaging of [GEANT_MuC_Nu_Flux_Gen](https://github.com/jon-rositas/GEANT4_MuC_Nu_Flux_Gen), which propagates a muon beam through the IMCC 3 TeV / 10 TeV collider lattices with BDSIM/GEANT4 and produces neutrino flux files for downstream studies.
 
 The upstream `generate_nu_flux.py` writes **two outputs**: 
 - A GEANT4-format `.root`, and
