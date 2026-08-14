@@ -297,38 +297,87 @@ def run_sim(madx_file, collider_dir):
     return
 
 
+def load_run_config(path="run.conf"):
+    """Read run parameters from a `key: value` config file in the working dir.
+
+    This build is config-driven (non-interactive): it requires ./run.conf and
+    does NOT prompt. See run.conf.example for the format. Comments (#) and blank
+    lines are ignored; keys are case-insensitive.
+    """
+    if not os.path.isfile(path):
+        sys.exit(
+            f"ERROR: no '{path}' found in the working directory.\n"
+            "This build is config-driven and non-interactive. Create a run.conf\n"
+            "(see run.conf.example) with: geometry, particle, energy_cap, distance,\n"
+            "particles, muon_lifetime, sample_all, delete_intermediate."
+        )
+    cfg = {}
+    with open(path) as fh:
+        for lineno, raw in enumerate(fh, 1):
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if ":" not in line:
+                sys.exit(f"ERROR: {path} line {lineno}: expected 'key: value', got: {raw.strip()}")
+            key, val = line.split(":", 1)
+            cfg[key.strip().lower()] = val.strip()
+
+    required = ["geometry", "particle", "energy_cap", "distance",
+                "particles", "muon_lifetime", "sample_all", "delete_intermediate"]
+    missing = [k for k in required if k not in cfg]
+    if missing:
+        sys.exit(f"ERROR: {path} is missing required keys: {', '.join(missing)}")
+    return cfg
+
+
 def main():
-    print("=== MUON COLLIDER INTERACTIVE NEUTRINO FLUX GENERATION ===")
+    print("=== MUON COLLIDER NEUTRINO FLUX GENERATION (config-driven) ===")
     no_list = ["N", "n", "no", "No", "NO"]
     yes_list = ["Y", "y", "yes", "YES", "Yes"]
     # User inputs
-    geom = input("Select Geometry [3 / 10] (TeV CoM): ").strip()
+    # --- Config-driven parameters (replaces the interactive prompts) --------
+    # Reads ./run.conf in the working directory. Each config key maps to the
+    # same variable the interactive version produced, so all downstream logic
+    # is unchanged.
+    cfg = load_run_config("run.conf")
+    print(f"Loaded run configuration from run.conf: {cfg}")
+
+    geom = cfg["geometry"]
+    if geom not in ("3", "10"):
+        sys.exit(f"ERROR: run.conf 'geometry' must be 3 or 10, got: {geom}")
     energy = 1500 if geom == "3" else 5000
 
-    particle_type = input("Select Particle [muon / antimuon]: ").strip().lower()
-    matter_flag = "M"
-    if particle_type == "antimuon":
-        matter_flag = "A"
+    particle_type = cfg["particle"].lower()
+    if particle_type not in ("muon", "antimuon"):
+        sys.exit(f"ERROR: run.conf 'particle' must be muon or antimuon, got: {particle_type}")
+    matter_flag = "A" if particle_type == "antimuon" else "M"
 
-    energy_input = input("Enter Max Neutrino Energy to Save (GeV) [blank for no cap]: ").strip()
-    energy_cap = float(energy_input) if energy_input else energy
+    # energy_cap: a number in GeV, or "none"/"" to use the beam energy (no cap).
+    energy_cap_raw = cfg["energy_cap"].strip().lower()
+    if energy_cap_raw in ("", "none", "no", "nocap", "no-cap"):
+        energy_cap = energy
+    else:
+        try:
+            energy_cap = float(cfg["energy_cap"])
+        except ValueError:
+            sys.exit(f"ERROR: run.conf 'energy_cap' must be a number or 'none', got: {cfg['energy_cap']}")
 
-    requested_dist = float(input("Enter target distance from IP (meters) [e.g., 200]: ").strip())
+    try:
+        requested_dist = float(cfg["distance"])
+    except ValueError:
+        sys.exit(f"ERROR: run.conf 'distance' must be a number (meters), got: {cfg['distance']}")
 
-    shots = input("Enter number of particles to fire [e.g., 1000]: ").strip()
+    shots = cfg["particles"].strip()
 
-    # uses lifetime calculator to automatically generate an optimal lifetime
+    # Default bias uses the lifetime calculator; a numeric muon_lifetime overrides it.
     mu_life, bias_factor = calc_muon_lifetime(float(energy), float(requested_dist))
+    life_raw = cfg["muon_lifetime"].strip().lower()
+    if life_raw not in ("default", "auto", ""):
+        mu_life = cfg["muon_lifetime"].strip()   # explicit override (string, as upstream)
 
-    bias_ans = input(f"Use default bias (lifetime = {mu_life:.2e} s)? [Y/N]: ").strip()
+    sample_bool = cfg["sample_all"].strip().lower() in ("y", "yes", "true", "1")
 
-    if bias_ans in no_list:
-        mu_life = input("Enter preferred muon lifetime (s) (naturally 2.2e-6 s): ").strip()
-
-    sample_ans = input("Sample after all elements? [Y/N]: ")
-    sample_bool = True if sample_ans in yes_list else False
-
-    clean = input("Delete intermediate files when finished? [Y/N]: ").strip()
+    clean = cfg["delete_intermediate"].strip()
     clean_bool = False if clean in no_list else  True
 
     norm_emittance = 25e-6 # in meters, taken from Table 1.1.1 of the 2026 IMCC Report
@@ -344,12 +393,16 @@ def main():
         return e_g
     emittance = calc_emittance(float(energy)*10**9, norm_emittance)
     
-    # Assign paths to the directories and relevant files for each detector case
-    collider_dir = "acc-models-mc/collider/10_TeV/"
+    # Geometry location. `geometry_dir` in run.conf points at the acc-models-mc
+    # checkout (default: /geometry, a clean mountpoint bind-mounted at run time).
+    # This decouples the geometry from the working directory — it can be mounted
+    # anywhere, cloned once, and shared across runs.
+    geometry_dir = cfg.get("geometry_dir", "/geometry").rstrip("/")
+    collider_dir = f"{geometry_dir}/collider/10_TeV/"
     ring_file = "ring_v06.madx"
     if geom == "3":
-        collider_dir = "acc-models-mc/collider/3_TeV/"
-        ring_file = "MC3.0TeV_v1.2.madx" 
+        collider_dir = f"{geometry_dir}/collider/3_TeV/"
+        ring_file = "MC3.0TeV_v1.2.madx"
     elif geom != "10":
         print("Warning: Unknown geometry selected. Defaulting to 10 TeV parameters.")
 

@@ -43,14 +43,17 @@ Stage: root-install
     #   export APPTAINERENV_ROOT_URL="https://root.cern/download/root_v<...>.tar.gz"
     #   apptainer build --fakeroot nuflux.sif nuflux.def
     # Or just replace the default URL on the line below.
-    # ROOT 6.34.10 — this is STAGE 1 of the two-stage workflow (see
-    # genie_convert/README.md). Stage 1's ROOT is INDEPENDENT of the GENIE
-    # container's ROOT: the two stages exchange only a plain .root file
-    # (compatible across ROOT 6.x), so stage 1 does NOT need to match GENIE's
-    # 6.28. It DOES need PyROOT (the script's `import ROOT`), which standard
-    # root.cern binaries include. 6.34.10 was verified reachable (HTTP 200);
-    # adjust for your target if root.cern's filename differs — see
-    # https://root.cern/install/all_releases/ (Ubuntu 22 x86_64).
+    # ROOT 6.34.10. This single ROOT serves BOTH the physics stack and GENIE
+    # (built in the genie-build stage against this same ROOT), which is what
+    # makes the pipeline single-container. Two requirements it must satisfy:
+    #   1. PyROOT — the flux script does `import ROOT`. Standard root.cern
+    #      binaries include it.
+    #   2. GSL/MathMore — GENIE's configure hard-fails without it
+    #      ("ROOT needs to be built with GSL/MathMore enabled"). root.cern's
+    #      prebuilt binaries do include mathmore; verify after a version bump
+    #      with: root-config --features | grep mathmore
+    # 6.34.10 was verified reachable (HTTP 200); adjust for your target if
+    # root.cern's filename differs — see https://root.cern/install/all_releases/
     ROOT_URL="${ROOT_URL:-https://root.cern/download/root_v6.34.10.Linux-ubuntu22.04-x86_64-gcc11.4.tar.gz}"
     echo "Fetching ROOT from: $ROOT_URL"
     # Fail fast with a clear message if the URL 404s, rather than letting
@@ -185,6 +188,219 @@ Stage: bdsim-build
     # Result: /opt/bdsim/
 
 # =============================================================================
+# Stage: genie-build
+# Builds GENIE and its external dependencies (LHAPDF, Pythia6) against the SAME
+# ROOT this image ships, so GENIE's libraries are ABI-compatible with it. This
+# is what lets the pipeline run in ONE container: the flux script needs both
+# PyROOT (to run) and GENIE's libGTlFlx (to write the gsimple output).
+#
+# GENIE hard-requires ROOT built with GSL/MathMore — root.cern's prebuilt
+# binaries include mathmore, which is why the prebuilt ROOT in root-install
+# works here (verified: `root-config --features` lists mathmore).
+#
+# Dependency sources (all verified reachable from %post at build time):
+#   GENIE   : github.com/GENIE-MC/Generator  (pinned tag)
+#   LHAPDF  : lhapdf.hepforge.org            (not packaged in Ubuntu)
+#   Pythia6 : fetched by GENIE's own build_pythia6.sh helper
+#   log4cpp/libxml2/GSL : Ubuntu packages
+# NOTE: GENIE's build_ext.sh orchestrator pulls from a personal academic URL
+# (hepunx.rl.ac.uk) that 301-redirects to a dead target — do NOT use it. Call
+# the individual helper (build_pythia6.sh) and build LHAPDF directly instead.
+# =============================================================================
+Bootstrap: docker
+From: ubuntu:22.04
+Stage: genie-build
+
+%files from root-install
+    /opt/root /opt/root
+
+%post
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential make cmake git wget curl ca-certificates \
+        gfortran \
+        libgsl-dev liblog4cpp5-dev libxml2-dev zlib1g-dev \
+        libtbb-dev libfreetype6 \
+        python3 python3-dev
+        # gfortran: Pythia6 is Fortran — without it build_pythia6.sh fails.
+        # libgsl-dev: GENIE compiles against GSL headers. NOTE the runtime GSL
+        #   libs are already pulled in by ROOT's mathmore, but the -dev headers
+        #   are NOT in the base image, so they must be installed here.
+        # liblog4cpp5-dev / libxml2-dev: GENIE lists both as "always needed".
+        # libtbb-dev: ROOT's libImt links Intel TBB. Anything that links ROOT
+        # — including GENIE's apps — fails with "undefined reference to
+        # tbb::detail::r1::..." without it. Same requirement as bdsim-build.
+
+    # ---- versions (override with APPTAINERENV_* at build time) -------------
+    GENIE_TAG="${GENIE_TAG:-R-3_04_02}"        # matches GENIE 3.04.02
+    LHAPDF_VER="${LHAPDF_VER:-6.5.6}"          # latest listed on hepforge
+    PYTHIA6_VER="${PYTHIA6_VER:-6.4.28}"       # build_pythia6.sh default
+
+    # ---- LHAPDF (from source; not in Ubuntu repos) -------------------------
+    cd /opt
+    LHAPDF_URL="https://lhapdf.hepforge.org/downloads/?f=LHAPDF-${LHAPDF_VER}.tar.gz"
+    echo "Fetching LHAPDF from: $LHAPDF_URL"
+    if ! wget -q -O lhapdf.tar.gz "$LHAPDF_URL"; then
+        echo "ERROR: could not download LHAPDF ${LHAPDF_VER}." >&2
+        echo "  Check the current version list at https://lhapdf.hepforge.org/downloads/" >&2
+        echo "  and override with APPTAINERENV_LHAPDF_VER=<version>." >&2
+        exit 1
+    fi
+    tar -xzf lhapdf.tar.gz && rm lhapdf.tar.gz
+    cd "LHAPDF-${LHAPDF_VER}"
+    ./configure --prefix=/opt/lhapdf --disable-python
+    make -j"$(nproc)" && make install
+    cd /opt && rm -rf "LHAPDF-${LHAPDF_VER}"
+    # Result: /opt/lhapdf/
+
+    # ---- GENIE source ------------------------------------------------------
+    cd /opt
+    git clone --depth 1 --branch "$GENIE_TAG" \
+        https://github.com/GENIE-MC/Generator.git genie-src
+    export GENIE=/opt/genie-src
+
+    # ---- Pythia6 --------------------------------------------------------
+    # GENIE's build_pythia6.sh is used ONLY to fetch the sources. Its actual
+    # library build fails on modern systems: it calls `fsplit` (not packaged in
+    # Ubuntu) to split pythia6428.f into per-routine files, build a static
+    # liblund.a, and link the .so from that. Without fsplit it silently
+    # produces a ~16 KB stub containing just the C wrapper — which links fine
+    # but has NO Pythia6 symbols, failing much later inside GENIE.
+    # We therefore ignore its output and compile the shared library directly
+    # from the downloaded sources, which also sidesteps the BLOCK DATA/PYDATA
+    # problem the split existed to solve (linking objects straight into a .so
+    # includes block data unconditionally, unlike pulling from a static archive).
+    mkdir -p /opt/pythia6-build && cd /opt/pythia6-build
+    bash "$GENIE/src/scripts/build/ext/build_pythia6.sh" "$PYTHIA6_VER" || true
+
+    P6SRC=$(find /opt/pythia6-build -name "pythia6*.f" | head -1)
+    P6WRAPF=$(find /opt/pythia6-build -name "tpythia6_called_from_cc.F" | head -1)
+    P6WRAPC=$(find /opt/pythia6-build -name "pythia6_common_address.c" | head -1)
+    if [ -z "$P6SRC" ] || [ -z "$P6WRAPF" ] || [ -z "$P6WRAPC" ]; then
+        echo "ERROR: Pythia6 sources not downloaded by build_pythia6.sh." >&2
+        echo "  Looked for pythia6*.f, tpythia6_called_from_cc.F," >&2
+        echo "  pythia6_common_address.c under /opt/pythia6-build." >&2
+        exit 1
+    fi
+
+    mkdir -p /opt/pythia6/lib
+    # -fcommon is REQUIRED: GCC 10+ defaults to -fno-common, which makes the C
+    # wrapper's globals collide with the Fortran COMMON blocks
+    # ("multiple definition of `pydat1_'"). Do NOT remove.
+    gcc -c -fPIC -O2 -fcommon -o /tmp/pythia6_common_address.o "$P6WRAPC"
+    gfortran -shared -fPIC -O2 -fno-second-underscore \
+        -o /opt/pythia6/lib/libPythia6.so \
+        "$P6SRC" "$P6WRAPF" /tmp/pythia6_common_address.o
+
+    # Guard properly: a stub also "exists", so check size AND symbols.
+    P6SIZE=$(stat -c%s /opt/pythia6/lib/libPythia6.so 2>/dev/null || echo 0)
+    if [ "$P6SIZE" -lt 500000 ] || ! nm -D /opt/pythia6/lib/libPythia6.so | grep -q "pyinit_"; then
+        echo "ERROR: libPythia6.so looks empty (${P6SIZE} bytes, no pyinit_ symbol)." >&2
+        echo "  A real library is ~2.6 MB. Check the gfortran output above." >&2
+        exit 1
+    fi
+
+    # ---- ROOT's TPythia6 interface (libEGPythia6) ---------------------------
+    # GENIE includes <TPythia6.h> in its CORE framework (Framework/Numerical/
+    # RandomGen.cxx, Decay/, Hadronization/, HELepton/) and links -lEGPythia6
+    # unconditionally (src/make/Make.include:265). There is no --disable-pythia6
+    # and switching to Pythia8 does NOT remove this — Pythia6 is hard-wired.
+    #
+    # That class is ROOT's Pythia6 module — and ROOT **REMOVED it in 6.32**:
+    #   ROOT 6.28, 6.30  -> montecarlo/pythia6 present
+    #   ROOT 6.32, 6.34  -> removed entirely
+    # So it cannot be built from this image's own ROOT (6.34) sources. Instead
+    # take the module from the LAST ROOT release that shipped it (6.30) and
+    # compile it against the installed 6.34. That works because everything the
+    # module depends on still exists in 6.34: TPythia6 derives from TGenerator
+    # and TPythia6Decayer from TVirtualMCDecayer, both still provided by
+    # montecarlo/eg in 6.34 (verified).
+    #
+    # (This is also why the reference GENIE container used ROOT 6.28 — it was
+    # custom-built with pythia6 enabled. Stock root.cern binaries never ship it,
+    # so downgrading ROOT alone would not help; the module must be built either
+    # way.)
+    ROOT_PYTHIA6_TAG="${ROOT_PYTHIA6_TAG:-v6-30-06}"   # last ROOT with montecarlo/pythia6
+    cd /opt
+    git clone --depth 1 --branch "$ROOT_PYTHIA6_TAG" --filter=blob:none --sparse \
+        https://github.com/root-project/root.git root-src
+    cd root-src && git sparse-checkout set montecarlo/pythia6
+    if [ ! -f montecarlo/pythia6/inc/TPythia6.h ]; then
+        echo "ERROR: TPythia6 sources not found in ROOT $ROOT_PYTHIA6_TAG." >&2
+        echo "  Expected /opt/root-src/montecarlo/pythia6/inc/TPythia6.h" >&2
+        echo "  ROOT removed this module in 6.32 — ROOT_PYTHIA6_TAG must be a" >&2
+        echo "  release that still has it (6.30.x or 6.28.x)." >&2
+        exit 1
+    fi
+    bash -c '
+        set -e
+        . /opt/root/bin/thisroot.sh
+        cd /opt/root-src/montecarlo/pythia6
+        mkdir -p build && cd build
+        # Headers to dictionary-ify: everything except LinkDef (which must come last).
+        HDRS=$(ls ../inc/*.h | grep -v LinkDef || true)
+        rootcling -f G__EGPythia6.cxx \
+            -rmf libEGPythia6.rootmap -rml libEGPythia6.so \
+            -I../inc $HDRS ../inc/LinkDef.h
+        # Build all module sources + the generated dictionary into one shared lib.
+        g++ -shared -fPIC -O2 -std=c++17 $(root-config --cflags) -I../inc \
+            ../src/*.cxx G__EGPythia6.cxx \
+            -o libEGPythia6.so \
+            $(root-config --libs) -lEG \
+            -L/opt/pythia6/lib -lPythia6 -lgfortran
+        # Install into ROOT so that GENIE (which relies on root-config --glibs
+        # supplying -L/opt/root/lib) finds -lEGPythia6 and <TPythia6.h>.
+        cp libEGPythia6.so /opt/root/lib/
+        cp libEGPythia6.rootmap /opt/root/lib/ 2>/dev/null || true
+        cp *_rdict.pcm /opt/root/lib/ 2>/dev/null || true
+        cp ../inc/*.h /opt/root/include/
+    '
+    if [ ! -f /opt/root/lib/libEGPythia6.so ] || [ ! -f /opt/root/include/TPythia6.h ]; then
+        echo "ERROR: libEGPythia6.so / TPythia6.h were not installed into /opt/root." >&2
+        echo "  GENIE's build will fail on '#include <TPythia6.h>' without them." >&2
+        exit 1
+    fi
+    # Stage a copy (plus its Cling dictionary files) under a directory the final
+    # stage copies wholesale. The final image's /opt/root comes from the
+    # root-install stage and so lacks anything added here; /opt/genie is copied
+    # from THIS stage and is first on LD_LIBRARY_PATH at run time. Wildcards are
+    # used because the generated .pcm/.rootmap names vary by ROOT version, which
+    # would make an explicit %files entry brittle.
+    mkdir -p /opt/genie/lib
+    cp /opt/root/lib/libEGPythia6.so /opt/genie/lib/
+    cp /opt/root-src/montecarlo/pythia6/build/libEGPythia6.rootmap /opt/genie/lib/ 2>/dev/null || true
+    cp /opt/root-src/montecarlo/pythia6/build/*_rdict.pcm /opt/genie/lib/ 2>/dev/null || true
+
+    # ---- GENIE itself, configured against THIS ROOT ------------------------
+    cd "$GENIE"
+    bash -c '
+        set -e
+        . /opt/root/bin/thisroot.sh
+        export GENIE=/opt/genie-src
+        export PYTHIA6=/opt/pythia6/lib
+        export LHAPDF6_INC=/opt/lhapdf/include
+        export LHAPDF6_LIB=/opt/lhapdf/lib
+        ./configure \
+            --prefix=/opt/genie \
+            --enable-lhapdf6 \
+            --enable-flux-drivers \
+            --enable-geom-drivers \
+            --with-pythia6-lib=/opt/pythia6/lib \
+            --with-lhapdf6-inc=/opt/lhapdf/include \
+            --with-lhapdf6-lib=/opt/lhapdf/lib
+        make -j"$(nproc)"
+        make install
+    '
+    # Sanity: the pipeline needs libGTlFlx (GENIE flux drivers, hence
+    # --enable-flux-drivers above). Fail the build here rather than at runtime.
+    if ! find /opt/genie /opt/genie-src -name "libGTlFlx*" | grep -q .; then
+        echo "ERROR: GENIE built but libGTlFlx was not produced." >&2
+        echo "  The gsimple output step needs it. Check that ./configure kept" >&2
+        echo "  --enable-flux-drivers and review the GENIE build log above." >&2
+        exit 1
+    fi
+    # Result: /opt/genie/ (+ /opt/lhapdf, /opt/pythia6)
+
+# =============================================================================
 # Final stage — runtime image
 # =============================================================================
 Bootstrap: docker
@@ -199,6 +415,12 @@ Stage: final
     /opt/geant4 /opt/geant4
 %files from bdsim-build
     /opt/bdsim /opt/bdsim
+%files from genie-build
+    /opt/genie /opt/genie
+    /opt/lhapdf /opt/lhapdf
+    /opt/pythia6 /opt/pythia6
+    /opt/root/lib/libEGPythia6.so /opt/root/lib/libEGPythia6.so
+    /opt/root/include/TPythia6.h /opt/root/include/TPythia6.h
 
 %files
     patches/patch_pybdsim.py /opt/patch_pybdsim.py
@@ -209,7 +431,18 @@ Stage: final
         python3 python3-pip \
         g++ libstdc++-11-dev \
         libexpat1 libxml2 libxerces-c3.2 libtbb12 \
+        liblog4cpp5v5 libgsl27 libgfortran5 libfreetype6 \
         zlib1g wget git ca-certificates
+        # libfreetype6: NOT for graphics. libEGPythia6 (and GENIE, which links
+        # `root-config --glibs`) reference ROOT's Graf/Gpad libs, which need
+        # freetype at LOAD time even though nothing ever draws. Without it,
+        # gSystem->Load("libEGPythia6") fails with
+        # "libfreetype.so.6: cannot open shared object file".
+        # liblog4cpp5v5 / libgsl27 / libgfortran5: RUNTIME counterparts of the
+        # -dev packages used in genie-build. GENIE links log4cpp and GSL, and
+        # Pythia6 is Fortran (needs libgfortran at run time). Without these the
+        # GENIE libraries fail to load with "liblog4cpp.so.5: cannot open
+        # shared object file" / similar, even though they built fine.
         # g++ + libstdc++-11-dev: REQUIRED at runtime, not just build time.
         # ROOT's Cling is a JIT C++ interpreter; PyROOT (`import ROOT`) makes
         # Cling compile C++ on the fly, so it needs the C++ standard-library
@@ -256,17 +489,21 @@ Stage: final
     export MADX=/opt/madx/madx-linux64-gnu
     export ROOTSYS=/opt/root
     export G4INSTALL=/opt/geant4
-    # GENIE is NOT built into this image (it's undocumented upstream and heavy).
-    # generate_nu_flux.py calls ROOT.gSystem.Load("libGTlFlx") to write its
-    # second, GENIE-format ("gsimple") output file, and sys.exit(1)s if that
-    # load fails. Bind-mount your GENIE install over /opt/genie at run time;
-    # GENIE_LIB is prepended to LD_LIBRARY_PATH below so libGTlFlx is found.
-    # Override GENIE_LIB at run time (APPTAINERENV_GENIE_LIB=...) if your GENIE
-    # libs live somewhere other than /opt/genie/lib. GENIE typically also needs
-    # its LHAPDF/PYTHIA6/log4cpp libs on the path — mount/point at those too.
+    # GENIE is built INTO this image (see the genie-build stage), together with
+    # its LHAPDF and Pythia6 dependencies, all against this image's ROOT. That
+    # is what makes the pipeline single-container: generate_nu_flux.py can both
+    # `import ROOT` (PyROOT) and ROOT.gSystem.Load("libGTlFlx") in one process.
+    # $GENIE is GENIE's own conventional root-dir variable; its tools expect it.
+    export GENIE=/opt/genie
     export GENIE_LIB=/opt/genie/lib
-    export LD_LIBRARY_PATH=${GENIE_LIB}:/opt/clhep/lib:/opt/root/lib:/opt/geant4/lib:/opt/bdsim/lib:${LD_LIBRARY_PATH}
-    export PATH=/opt/root/bin:/opt/geant4/bin:/opt/bdsim/bin:/opt/madx:${PATH}
+    # GENIE's ROOT dictionaries reference its headers as
+    # "Framework/Algorithm/AlgStatus.h" etc., i.e. relative to the GENIE
+    # include root. Without this, Cling prints "Missing FileEntry for ..."
+    # for every GENIE class and cannot JIT anything needing full definitions.
+    export ROOT_INCLUDE_PATH=/opt/genie/include/GENIE:${ROOT_INCLUDE_PATH}
+    export LHAPATH=/opt/lhapdf/share/LHAPDF
+    export LD_LIBRARY_PATH=${GENIE_LIB}:/opt/lhapdf/lib:/opt/pythia6/lib:/opt/clhep/lib:/opt/root/lib:/opt/geant4/lib:/opt/bdsim/lib:${LD_LIBRARY_PATH}
+    export PATH=/opt/genie/bin:/opt/root/bin:/opt/geant4/bin:/opt/bdsim/bin:/opt/madx:${PATH}
 
 %runscript
     #!/bin/bash
@@ -282,17 +519,16 @@ Stage: final
         echo "hardcoded path and likely fail to find MAD-X." >&2
     fi
 
-    # GENIE pre-flight: the script hard-exits (sys.exit 1) if it can't load
-    # libGTlFlx for its second (gsimple) output file. Warn clearly here if no
-    # GENIE was bind-mounted, so the failure is understandable rather than a
-    # bare "Could not load GENIE's libGTlFlx" mid-run.
+    # GENIE pre-flight: GENIE is built into this image, so libGTlFlx should
+    # always be present. If it isn't, the image is broken (bad build or a bind
+    # shadowing /opt/genie) — say so plainly rather than letting the script die
+    # later with a bare "Could not load GENIE's libGTlFlx".
     if ! ls "${GENIE_LIB:-/opt/genie/lib}"/libGTlFlx* >/dev/null 2>&1; then
         echo "WARNING: libGTlFlx not found under \$GENIE_LIB=${GENIE_LIB:-/opt/genie/lib}." >&2
-        echo "GENIE is not built into this image. The MAD-X/BDSIM/GEANT4 run and the" >&2
-        echo "first (GEANT4) output file will work, but the GENIE 'gsimple' output" >&2
-        echo "step will fail. To enable it, bind-mount your GENIE install, e.g.:" >&2
-        echo "  apptainer run --bind ./work:/work --bind /path/to/genie:/opt/genie nuflux.sif" >&2
-        echo "and ensure libGTlFlx (and GENIE's LHAPDF/PYTHIA6/log4cpp libs) are under it." >&2
+        echo "GENIE ships inside this image, so this indicates a problem: either the" >&2
+        echo "image was built without --enable-flux-drivers, or a bind-mount is" >&2
+        echo "shadowing /opt/genie. The GEANT4 output will still be written, but the" >&2
+        echo "GENIE 'gsimple' step will fail." >&2
     fi
 
     # generate_nu_flux.py resolves geometry via CWD-relative paths, e.g.
