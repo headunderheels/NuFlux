@@ -23,7 +23,7 @@ checks/
 ### 1. Pull the pre-built image
 
 ```bash
-apptainer pull nuflux.sif oras://ghcr.io/headunderheels/nuflux:0.2.0
+apptainer pull nuflux.sif oras://ghcr.io/headunderheels/nuflux:0.1.0
 ```
 
 Or build it yourself: see [Building](#building).
