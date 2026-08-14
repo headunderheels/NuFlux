@@ -1,60 +1,79 @@
-# NuFlux — containerized muon-collider neutrino flux generator
+# NuFlux | muon collider lattice neutrino flux file generator
 
-Containerized repackaging of [GEANT_MiC_Nu_Flux_Gen](https://github.com/jon-rositas/GEANT4_MuC_Nu_Flux_Gen), which propagates a muon beam through the IMCC 3 TeV / 10 TeV collider lattices with BDSIM/GEANT4 and produces neutrino flux files for downstream studies.
+`Now containerized!`
 
-The upstream `generate_nu_flux.py` writes **two outputs**: 
-- A GEANT4-format `.root`, and
-- A GENIE-format "gsimple" `.root`.
+This repository provides an (Apptainer-based) containerized repackaging of [GEANT4_MuC_Nu_Flux_Gen](https://github.com/jon-rositas/GEANT4_MuC_Nu_Flux_Gen), which propagates a muon beam through the IMCC 3 TeV / 10 TeV collider lattices using BDSIM/GEANT4, producing neutrino flux files for downstream studies.
 
-The script depends on a large software stack (GEANT4 and BDSIM configured against CLHEP, as well as ROOT, BDSIM, MAD-X, and GENIE). (For now,) this repo runs the workflow as two stages across two images: one image for the bulk of the work (which can be built from `nuflux.def`), and a seperate image hosted at [ghcr.io/lawrenceleejr/g4targetpractice-genie]() for the GENIE conversion step.
-
-Everything here is runnable with Apptainer (e.g. on the OSG cluster).
+Each run writes two outputs: a GEANT4-format `.root` and a GENIE-format "gsimple" `.root`.
 
 ## Contents
 
 ```
-nuflux.def            Apptainer definition (CLHEP, GEANT4 11.2.1, ROOT 6.34 w/ PyROOT, BDSIM, MAD-X).
-patches/
-  patch_pybdsim.py    Teaches pybdsim the MUON/ANTIMUON particles.
-genie_convert/        Wrapper + RNTuple->TTree bridge (workaround for issues with ROOT versioning) + GENIE gsimple converter.
+nuflux.def            Apptainer definition in case you care to build the image yourself.
+generate_nu_flux.py   The simulation script.
+examples/             Annotated run configuration files.
+patches/              `pybdsim` MUON/ANTIMUON patch applied during the build.
 checks/
-  prebuild-checks.sh  Host preflight — run BEFORE building (apptainer, fakeroot,
-                      files, network, disk). Nothing compiles.
-  validate_stack.sh   Post-build check — run INSIDE the .sif to confirm the
-                      stack links and imports.
+  prebuild-checks.sh  Pre-build checks (if building the image yourself).
+  postbuild-checks.sh Run inside the .sif to confirm the stack links and imports.
 ```
 
 ## Quick start
 
-### 1. Pull the images
+### 1. Pull the pre-built image
 
 ```bash
-# Main image configured in this repository
-apptainer pull nuflux.sif oras://ghcr.io/headunderheels/nuflux:0.1.0
-
-# GENIE image (!!! NOT YET LIKELY TO BE STABLE !!!)
-apptainer pull ~/images/genie.sif \
-  docker://ghcr.io/lawrenceleejr/g4targetpractice-genie:claude-gdml-target-practice-refactor-mrygc9-f1e0631
+apptainer pull nuflux.sif oras://ghcr.io/headunderheels/nuflux:0.2.0
 ```
 
+Or build it yourself: see [Building](#building).
 
-### 2. Set up the working set
-
-Clone the accelerator geometry into `work/` — this is where the pipeline reads inputs and writes outputs. The core script (`generate_nu_flux.py`) ships in this repo and is copied in automatically when you run.
+### 2. Clone the lattice geometry
 
 ```bash
-mkdir -p work && git clone https://gitlab.cern.ch/acc-models/acc-models-mc.git work/acc-models-mc
+git clone https://gitlab.cern.ch/acc-models/acc-models-mc.git geometry/acc-models-mc
 ```
 
-Point `NUFLUX_WORK` at this directory in the next step.
+### 3. Configure your run
 
-### 3. Run the two-stage pipeline
+Each run has its own subdirectory containing a configuration and outputs (once they are produced). Create a run directory and populate it:
 
 ```bash
-export GENIE_SIF=~/images/genie.sif
-export NUFLUX_WORK=$PWD/work
-./genie_convert/run_nuflux_2stage.sh
+mkdir -p runs/my-run
+cp examples/template.conf runs/my-run/run.conf
 ```
 
-You'll answer a few interactive prompts (geometry, particle, energy, distance,
-particle count), then both flux files land in `work/output/`.
+Be sure to edit `run.conf` as desired *before* your run!
+
+### 4. Run
+
+```bash
+apptainer exec \
+  --bind "$PWD/runs/my-run":/work \
+  --bind "$PWD/geometry/acc-models-mc":/geometry \
+  --bind "$PWD/generate_nu_flux.py":/opt/generate_nu_flux.py \
+  nuflux.sif \
+  bash -c '. /opt/geant4/bin/geant4.sh && . /opt/root/bin/thisroot.sh && cd /work && python3 /opt/generate_nu_flux.py'
+```
+
+Both `.root` files land in `runs/my-run/`.
+
+Three separate mounts, each with one job: the run directory is the working directory, the geometry is read-only and shared, and the script is supplied from the repo so you can edit it without rebuilding.
+
+## Building the image
+
+`Probably don't do this! :D`
+
+```bash
+./checks/prebuild-checks.sh
+apptainer build --fakeroot nuflux.sif nuflux.def
+apptainer exec --bind $PWD:/checks nuflux.sif bash /checks/checks/postbuild-checks.sh
+```
+
+The build compiles GEANT4, BDSIM, LHAPDF, Pythia6, and GENIE from source and takes hours. See [README-apptainer.md](README-apptainer.md) for the stage
+layout, version pins, and the non-obvious fixes baked in.
+
+## Caveats
+
+- **Geometry version.** The script expects IMCC v0.6 lattice filenames. If `acc-models-mc` has moved on, pin a commit.
+- The pipeline produces well-formed output; whether the flux is correct for a given configuration is a domain judgment.

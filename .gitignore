@@ -8,3 +8,8 @@ work/
 # Common build/output detritus
 *.root
 output/
+# Shared geometry checkout (cloned once, not ours to track)
+geometry/
+
+# Per-run directories: run.conf + outputs
+runs/
