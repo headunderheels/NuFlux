@@ -19,9 +19,12 @@ checks/
 ```
 
 ## Quick start
-
-### 1. Pull the pre-built image
-
+### 0. Clone the repository
+```bash
+git clone https://github.com/headunderheels/NuFlux.git && cd NuFlux
+```
+### 1. Pull the image from GHCR
+`Currently requires Apptainer, but working on Docker support!`
 ```bash
 apptainer pull nuflux.sif oras://ghcr.io/headunderheels/nuflux:0.1.0
 ```
