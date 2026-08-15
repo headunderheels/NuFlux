@@ -389,10 +389,13 @@ Stage: genie-build
             --with-lhapdf6-lib=/opt/lhapdf/lib
         make -j"$(nproc)"
         make install
+        # GENIE writes libraries to $GENIE/lib (the SOURCE dir), ignoring
+        # --prefix. Copy them into the install prefix so %files picks them up.
+        cp -a /opt/genie-src/lib/* /opt/genie/lib/
     '
     # Sanity: the pipeline needs libGTlFlx (GENIE flux drivers, hence
     # --enable-flux-drivers above). Fail the build here rather than at runtime.
-    if ! find /opt/genie /opt/genie-src -name "libGTlFlx*" | grep -q .; then
+    if [ ! -f /opt/genie/lib/libGTlFlx.so ]; then
         echo "ERROR: GENIE built but libGTlFlx was not produced." >&2
         echo "  The gsimple output step needs it. Check that ./configure kept" >&2
         echo "  --enable-flux-drivers and review the GENIE build log above." >&2
